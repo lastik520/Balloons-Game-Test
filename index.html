@@ -223,14 +223,25 @@
             background-color: var(--accent);
         }
 
+        /* Контейнер выше самого шарика (180 vs 85) — пустое место под шариком тоже ловит нажатие.
+           Нажатие ловит сам браузер (нативный hit-test), без расчётов в JS. */
         .balloon-container {
             position: absolute;
             top: 0; left: 0;
-            width: 85px; height: 180px;
+            width: calc(85px * var(--fs, 1));
+            height: calc(180px * var(--fs, 1));
             animation: floatUp linear forwards;
             will-change: transform;
             z-index: 5;
-            pointer-events: none;
+        }
+        /* Невидимый запас по бокам и сверху */
+        .balloon-container::before {
+            content: "";
+            position: absolute;
+            top: calc(-10px * var(--fs, 1));
+            left: calc(-10px * var(--fs, 1));
+            right: calc(-10px * var(--fs, 1));
+            bottom: 0;
         }
         .paused { animation-play-state: paused !important; }
 
@@ -263,20 +274,10 @@
             border-bottom: 10px solid currentColor;
         }
 
-        .balloon-hit {
-            position: absolute;
-            top: calc(-14px * var(--fs, 1));
-            left: calc(-14px * var(--fs, 1));
-            width: calc(113px * var(--fs, 1));
-            height: calc(113px * var(--fs, 1));
-            border-radius: 50%;
-            pointer-events: none;
-            -webkit-tap-highlight-color: transparent;
-        }
-
+        /* Старт чуть ниже нижнего края (как в стабильной версии), высота берётся из JS на каждый шарик */
         @keyframes floatUp {
-            0%   { transform: translate3d(0, 130vh, 0); }
-            100% { transform: translate3d(0, -200px, 0); }
+            0%   { transform: translate3d(0, var(--start-y, 102vh), 0); }
+            100% { transform: translate3d(0, calc(-200px * var(--fs, 1)), 0); }
         }
 
         .particle {
@@ -1525,6 +1526,7 @@
             }
             requestAnimationFrame(function () {
                 viewportW = viewport.clientWidth;
+                viewportH = viewport.clientHeight;
                 recentLefts.length = 0;
                 positionTabIndicator(false);
                 updateViewportRect();
@@ -1736,26 +1738,19 @@
 
         const activeBalloons = new Set();
         let viewportW = viewport.clientWidth;
+        let viewportH = viewport.clientHeight;
 
         let bestSaveTimer = null;
         let pauseStartTime = 0;
 
         function pauseAllBalloons() {
-            pauseStartTime = performance.now();
             activeBalloons.forEach(function (b) { b.classList.add('paused'); });
         }
 
         function resumeAllBalloons() {
-            const now = performance.now();
-            const pauseDur = Math.max(0, now - pauseStartTime);
-            pauseStartTime = 0;
-            activeBalloons.forEach(function (b) {
-                const oldStart = parseFloat(b.dataset.startTime) || 0;
-                b.dataset.startTime = String(oldStart + pauseDur);
-                b.classList.add('paused');
-                void b.offsetHeight;
-                b.classList.remove('paused');
-            });
+            activeBalloons.forEach(function (b) { b.classList.add('paused'); });
+            void viewport.offsetHeight;
+            activeBalloons.forEach(function (b) { b.classList.remove('paused'); });
         }
 
         function refreshBestUI() {
@@ -1822,10 +1817,12 @@
                 best = score;
                 refreshBestUI();
                 if (!bestSaveTimer) {
+                    // localStorage синхронный и может «подвесить» кадр на слабых телефонах,
+                    // поэтому пишем редко (плюс при паузе / сворачивании / выходе)
                     bestSaveTimer = setTimeout(function () {
                         bestSaveTimer = null;
                         saveBest();
-                    }, 500);
+                    }, 5000);
                 }
             }
         }
@@ -2001,6 +1998,7 @@
         function startGameWithScore(startScore, startWave) {
             resetGame();
             viewportW = viewport.clientWidth;
+            viewportH = viewport.clientHeight;
             updateViewportRect();
             recentLefts.length = 0;
             score = startScore;
@@ -2077,34 +2075,22 @@
 
             const container = document.createElement('div');
             container.className = 'balloon-container';
-            container.dataset.color = color;
+            container._color = color;
 
             const balloon = document.createElement('div');
             balloon.className = 'balloon';
             balloon.style.backgroundColor = color;
             balloon.style.color = color;
-
-            const hit = document.createElement('div');
-            hit.className = 'balloon-hit';
-
             container.appendChild(balloon);
-            container.appendChild(hit);
 
             const bw = BALLOON_SIZE * fieldScale;
-            const leftPos = pickLeftPosition(bw);
-            const duration = getBalloonDuration();
-
-            container.style.left = leftPos + 'px';
-            container.style.animationDuration = duration + 's';
-
-            container.dataset.left = String(leftPos);
-            container.dataset.duration = String(duration);
-            container.dataset.startTime = String(performance.now());
+            container.style.left = pickLeftPosition(bw) + 'px';
+            container.style.animationDuration = getBalloonDuration() + 's';
+            // Старт сразу под нижним краем поля (как в стабильной версии)
+            container.style.setProperty('--start-y', Math.round(viewportH * 1.02) + 'px');
 
             viewport.appendChild(container);
             activeBalloons.add(container);
-
-            if (isPaused) container.classList.add('paused');
         }
 
         function gameLoop() {
@@ -2129,75 +2115,43 @@
             mainSpawnTimer = setTimeout(gameLoop, delay);
         }
 
-        function popBalloon(container, tapX, tapY) {
-            if (container.dataset.popped) return;
-            container.dataset.popped = '1';
-            activeBalloons.delete(container);
+        function popBalloon(container) {
+            // защита от двойного срабатывания
+            if (!activeBalloons.delete(container)) return;
 
-            // Сначала убираем шарик — отклик на экране мгновенный
+            // читаем геометрию до удаления (для центра взрыва)
+            const r = container.getBoundingClientRect();
+            const vr = viewport.getBoundingClientRect();
+            const cx = (r.left + (BALLOON_SIZE * fieldScale * gameScale) / 2 - vr.left) / gameScale;
+            const cy = (r.top + (BALLOON_SIZE * fieldScale * gameScale) / 2 - vr.top) / gameScale;
+
+            // 1) мгновенный визуальный отклик
             container.remove();
-
             score++;
             scoreEl.textContent = score;
-
-            Particles.burst(tapX, tapY, container.dataset.color || '#ffffff', 10);
-            Sfx.pop();
-
-            if (navigator.vibrate) {
-                try { navigator.vibrate(8); } catch (e) {}
-            }
-
+            Particles.burst(cx, cy, container._color || '#ffffff', 10);
             trackScoreProgress();
+
+            // 2) звук и вибрация — сразу после отрисовки кадра, чтобы не задерживать сам взрыв
+            requestAnimationFrame(function () {
+                setTimeout(function () {
+                    Sfx.pop();
+                    if (navigator.vibrate) {
+                        try { navigator.vibrate(8); } catch (e) {}
+                    }
+                }, 0);
+            });
         }
 
-        // Попадание считаем по РЕАЛЬНОЙ позиции шарика на экране (а не по расчёту
-        // от времени создания), поэтому лаги, vh на мобильных и пауза больше не сбивают хитбокс.
+        // Нативный hit-test: касание ловит сам шарик (как в стабильной версии), один обработчик на всё поле
         viewport.addEventListener('pointerdown', function (e) {
             if (!gameStarted || isPaused) return;
-
-            if (e.target && e.target.closest && e.target.closest('#ui-wrapper')) return;
-
-            const px = e.clientX;
-            const py = e.clientY;
-
-            let closest = null;
-            let closestDistSq = Infinity;
-
-            // Только чтение геометрии, без записи — один пересчёт layout на тап
-            activeBalloons.forEach(function (container) {
-                if (container.dataset.popped) return;
-                const body = container.firstElementChild;
-                if (!body) return;
-
-                const r = body.getBoundingClientRect();
-                if (r.width === 0) return;
-
-                const cx = r.left + r.width / 2;
-                const cy = r.top + r.height / 2;
-                // радиус шарика + запас (113/85 от размера, как раньше +14px)
-                const hitRadius = r.width * (113 / 85) / 2;
-
-                // Запас вниз: хитбокс продолжается под шариком (капсула), т.к. шарик
-                // летит вверх и палец обычно попадает чуть ниже того, что видно на экране.
-                // Размер считается от размера шарика, поэтому работает при любом Field scale.
-                const extraDown = r.width * 0.5;
-
-                const dx = px - cx;
-                let dy = py - cy;
-                if (dy > 0) dy = Math.max(0, dy - extraDown);
-                const distSq = dx * dx + dy * dy;
-
-                if (distSq < hitRadius * hitRadius && distSq < closestDistSq) {
-                    closestDistSq = distSq;
-                    closest = container;
-                }
-            });
-
-            if (closest) {
-                if (e.cancelable) e.preventDefault();
-                const vr = viewport.getBoundingClientRect();
-                popBalloon(closest, (px - vr.left) / gameScale, (py - vr.top) / gameScale);
-            }
+            const t = e.target;
+            if (!t || !t.closest) return;
+            const container = t.closest('.balloon-container');
+            if (!container) return;
+            if (e.cancelable) e.preventDefault();
+            popBalloon(container);
         }, { passive: false });
 
         viewport.addEventListener('animationend', function (e) {
@@ -2455,6 +2409,7 @@
             resizeRaf = requestAnimationFrame(function () {
                 resizeRaf = 0;
                 viewportW = viewport.clientWidth;
+                viewportH = viewport.clientHeight;
                 recentLefts.length = 0;
                 fieldSlider.render();
                 gameSlider.render();
