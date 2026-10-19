@@ -2177,8 +2177,14 @@
                 // радиус шарика + запас (113/85 от размера, как раньше +14px)
                 const hitRadius = r.width * (113 / 85) / 2;
 
+                // Запас вниз: хитбокс продолжается под шариком (капсула), т.к. шарик
+                // летит вверх и палец обычно попадает чуть ниже того, что видно на экране.
+                // Размер считается от размера шарика, поэтому работает при любом Field scale.
+                const extraDown = r.width * 0.5;
+
                 const dx = px - cx;
-                const dy = py - cy;
+                let dy = py - cy;
+                if (dy > 0) dy = Math.max(0, dy - extraDown);
                 const distSq = dx * dx + dy * dy;
 
                 if (distSq < hitRadius * hitRadius && distSq < closestDistSq) {
